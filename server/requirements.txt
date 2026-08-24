@@ -1,0 +1,28 @@
+# Core server
+fastmcp>=2.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+
+# PDF parsing
+pypdf>=4.0.0
+
+# Text splitting
+langchain-text-splitters>=0.2.0
+
+# Embeddings + cross-encoder reranking
+# NOTE: sentence-transformers pulls in torch.
+# For a smaller CPU-only torch install, run FIRST:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Then run:
+#   pip install -r server/requirements.txt
+sentence-transformers>=3.0.0
+
+# Vector search
+faiss-cpu>=1.8.0
+
+# Data validation
+pydantic>=2.0.0
+
+# Sample PDF generation (used only by scripts/make_sample_pdf.py)
+fpdf2>=2.7.0

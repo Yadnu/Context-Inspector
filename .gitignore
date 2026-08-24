@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+ENV/
+
+# Data / indexes (never commit embeddings or FAISS files)
+server/data/
+*.faiss
+*.meta.pkl
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Next.js (Stage 3)
+web/.next/
+web/node_modules/
+web/out/
+web/.vercel/
+
+# Test artifacts
+*.pdf
+!scripts/sample_contract.pdf
