@@ -1,5 +1,5 @@
 """
-Clause Lens — MCP server entry point.
+Clause Lens -- MCP server entry point.
 
 Architecture (FastMCP 3.x)
 --------------------------
@@ -31,8 +31,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from server.ingest import ingest_document
-from server.jit import jit_for_search
-from server.search import search_clauses as _search_clauses
+from server.jit import jit_for_compare, jit_for_search
+from server.models import IngestResponse
+from server.search import (
+    get_clause_by_id,
+    get_document_list,
+    search_clauses as _search_clauses,
+)
 
 # ---------------------------------------------------------------------------
 # MCP server
@@ -43,20 +48,15 @@ mcp = FastMCP(
     instructions=(
         "You are a contract analysis assistant powered by Clause Lens. "
         "ALWAYS use the search_clauses tool to find relevant text before answering. "
-        "ALWAYS cite the page number from each result you reference. "
+        "ALWAYS cite the page number and source document from each result you reference. "
         "If the tool returns no results or the jit field warns of low confidence, "
         "tell the user that no strongly matching clause was found. "
-        "NEVER answer from your own training knowledge."
+        "NEVER answer from your own training knowledge. "
+        "When a jit field is non-empty, follow its instructions exactly."
     ),
 )
 
-# CORS — allow the Next.js client (any origin in dev; tighten in prod)
-mcp.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS is applied by wrapping the ASGI app (see `app =` below)
 
 
 # ---------------------------------------------------------------------------
@@ -84,13 +84,98 @@ def search_clauses(
     Search contract clauses by natural-language query.
 
     Returns ranked results with page numbers and clause types.
-    Check the `jit` field for guidance on how to present results to the user.
+    Always check the `jit` field -- it contains mandatory guidance for
+    how to present results (e.g. low-confidence warning, multi-doc citation).
     """
     results = _search_clauses(query, clause_type=clause_type, top_k=top_k)
     top_score = results[0].score if results else 0.0
     return {
         "results": [r.model_dump() for r in results],
         "jit": jit_for_search(results, top_score),
+    }
+
+
+@mcp.tool()
+def get_clause(clause_id: str) -> dict:
+    """
+    Retrieve the full text and surrounding context for a single clause.
+
+    Use this when the user wants to read a specific clause in full, or
+    when search_clauses returned a truncated preview and more context
+    is needed. Check the `jit` field for page-boundary truncation warnings.
+
+    Parameters
+    ----------
+    clause_id : Stable clause identifier returned by search_clauses
+                (format: "<doc_id>:<chunk_index>").
+    """
+    detail = get_clause_by_id(clause_id)
+    if detail is None:
+        return {
+            "error": f"Clause '{clause_id}' not found. "
+            "Use list_documents to see available documents, "
+            "then search_clauses to find valid clause IDs."
+        }
+    return detail.model_dump()
+
+
+@mcp.tool()
+def list_documents() -> dict:
+    """
+    List all ingested contract documents.
+
+    Returns doc_id, filename, page count, and clause count for each document.
+    The `jit` field is always empty for this tool (no guidance needed).
+    Use doc IDs from this list to filter search_clauses results if needed.
+    """
+    docs = get_document_list()
+    return {
+        "documents": [d.model_dump() for d in docs],
+        "jit": "",
+    }
+
+
+@mcp.tool()
+def compare_clauses(clause_id_a: str, clause_id_b: str) -> dict:
+    """
+    Retrieve two clauses side-by-side for comparison.
+
+    Returns RAW TEXT ONLY -- no analysis. The LLM performs the comparison.
+    Check the `jit` field: if the two clauses are different types, the jit
+    field will instruct you to declare the type mismatch before comparing.
+
+    Parameters
+    ----------
+    clause_id_a : First clause ID (from search_clauses results).
+    clause_id_b : Second clause ID (from search_clauses results).
+    """
+    detail_a = get_clause_by_id(clause_id_a)
+    detail_b = get_clause_by_id(clause_id_b)
+
+    errors: list[str] = []
+    if detail_a is None:
+        errors.append(f"Clause not found: '{clause_id_a}'")
+    if detail_b is None:
+        errors.append(f"Clause not found: '{clause_id_b}'")
+    if errors:
+        return {"error": "; ".join(errors)}
+
+    # Strip surrounding_context and per-clause jit -- only raw text returned
+    def _to_raw(d: "ClauseDetail") -> dict:  # type: ignore[name-defined]
+        return {
+            "clause_id": d.clause_id,
+            "clause_type": d.clause_type.value,
+            "text": d.text,
+            "page": d.page,
+        }
+
+    return {
+        "clause_a": _to_raw(detail_a),
+        "clause_b": _to_raw(detail_b),
+        "jit": jit_for_compare(
+            detail_a.clause_type.value,
+            detail_b.clause_type.value,
+        ),
     }
 
 
@@ -129,11 +214,8 @@ async def ingest_endpoint(request: Request) -> JSONResponse:
 
     content: bytes = await file.read()
     file_size = len(content)
-
-    # Stable doc_id from original filename + size
     doc_id = hashlib.sha256(f"{filename}:{file_size}".encode()).hexdigest()[:16]
 
-    # Write to temp file so pypdf can open it
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(content)
         tmp_path = Path(tmp.name)
@@ -152,7 +234,15 @@ async def ingest_endpoint(request: Request) -> JSONResponse:
 # ASGI app export (for uvicorn / Railway)
 # ---------------------------------------------------------------------------
 
-app = mcp.http_app(transport="http")
+# Wrap with CORSMiddleware so the Next.js client can call from any origin.
+# Starlette's CORSMiddleware is ASGI-native and wraps cleanly around FastMCP.
+_mcp_app = mcp.http_app(transport="http", stateless_http=True)
+app = CORSMiddleware(
+    _mcp_app,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------------------------------
 # Dev entry point
